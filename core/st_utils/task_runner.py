@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
+from datetime import datetime
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -141,5 +144,19 @@ class TaskRunner:
 
             self.state = "completed"
         except Exception as e:
-            self.error_msg = str(e)
+            # Keep a short UI error while persisting full traceback to log.
+            self.error_msg = f"{self.current_label}: {e}"
+            try:
+                log_dir = Path("output/log")
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_file = log_dir / "task_runner_error.log"
+                trace = traceback.format_exc()
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with log_file.open("a", encoding="utf-8") as f:
+                    f.write(f"\n[{timestamp}] Step: {self.current_label}\n")
+                    f.write(trace)
+                    f.write("\n")
+            except Exception:
+                # Never let logging failure override original task error.
+                pass
             self.state = "error"

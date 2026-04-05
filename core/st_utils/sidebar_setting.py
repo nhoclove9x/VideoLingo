@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import platform
 from translations.translations import translate as t
 from translations.translations import DISPLAY_LANGUAGES
 from core.utils import *
@@ -60,6 +61,21 @@ def page_setting():
     if DISPLAY_LANGUAGES[display_language] != load_key("display_language"):
         update_key("display_language", DISPLAY_LANGUAGES[display_language])
         st.rerun()
+
+    # Show current ASR runtime status in sidebar
+    is_apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+    runtime_options = ["local", "cloud", "elevenlabs"]
+    if is_apple_silicon:
+        runtime_options.append("whispermlx")
+
+    current_runtime = load_key("whisper.runtime")
+    effective_runtime = current_runtime if current_runtime in runtime_options else "local"
+    if effective_runtime != current_runtime:
+        st.caption(
+            f"ASR Runtime: {effective_runtime} (fallback from {current_runtime})"
+        )
+    else:
+        st.caption(f"ASR Runtime: {effective_runtime}")
 
     # with st.expander(t("Youtube Settings"), expanded=True):
     #     config_input(t("Cookies Path"), "youtube.cookies_path")
@@ -179,10 +195,12 @@ def page_setting():
 
         runtime = st.selectbox(
             t("WhisperX Runtime"),
-            options=["local", "cloud", "elevenlabs"],
-            index=["local", "cloud", "elevenlabs"].index(load_key("whisper.runtime")),
+            options=runtime_options,
+            index=runtime_options.index(current_runtime)
+            if current_runtime in runtime_options
+            else 0,
             help=t(
-                "Local runtime requires >8GB GPU, cloud runtime requires 302ai API key, elevenlabs runtime requires ElevenLabs API key"
+                "Local runtime requires >8GB GPU, cloud runtime requires 302ai API key, elevenlabs runtime requires ElevenLabs API key, whispermlx runtime supports Apple Silicon."
             ),
         )
         if runtime != load_key("whisper.runtime"):
@@ -220,7 +238,7 @@ def page_setting():
             t("Burn-in Subtitles"),
             value=load_key("burn_subtitles"),
             help=t(
-                "Whether to burn subtitles into the video, will increase processing time"
+                "Enable to merge subtitles into video. Disable to stop before merge and keep SRT files for post-production."
             ),
         )
         if burn_subtitles != load_key("burn_subtitles"):
@@ -230,6 +248,7 @@ def page_setting():
         tts_methods = [
             "azure_tts",
             "openai_tts",
+            "chatanywhere_tts",
             "fish_tts",
             "sf_fish_tts",
             "edge_tts",
@@ -274,6 +293,23 @@ def page_setting():
         elif select_tts == "openai_tts":
             config_input("302ai API", "openai_tts.api_key")
             config_input(t("OpenAI Voice"), "openai_tts.voice")
+
+        elif select_tts == "chatanywhere_tts":
+            config_input("ChatAnywhere API Key", "chatanywhere_tts.api_key")
+            config_input("ChatAnywhere Voice", "chatanywhere_tts.voice")
+            config_input(
+                "ChatAnywhere Model",
+                "chatanywhere_tts.model",
+                help="Example: tts-1, gpt-4o-mini-tts",
+            )
+            custom_prompt = st.text_area(
+                "ChatAnywhere Custom Prompt (Optional)",
+                value=load_key("chatanywhere_tts.custom_prompt"),
+                help="Style/instruction for TTS. Works best on models that support `instructions`.",
+                placeholder="Speak in a calm and friendly tone.",
+            )
+            if custom_prompt != load_key("chatanywhere_tts.custom_prompt"):
+                update_key("chatanywhere_tts.custom_prompt", custom_prompt)
 
         elif select_tts == "fish_tts":
             config_input("302ai API", "fish_tts.api_key")

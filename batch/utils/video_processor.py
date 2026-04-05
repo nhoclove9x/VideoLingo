@@ -26,8 +26,16 @@ def process_video(file, dubbing=False, is_retry=False):
         ("✂️ Splitting sentences", split_sentences),
         ("📝 Summarizing and translating", summarize_and_translate),
         ("⚡ Processing and aligning subtitles", process_and_align_subtitles),
-        ("🎬 Merging subtitles to video", _7_sub_into_vid.merge_subtitles_to_video),
     ]
+    if load_key("burn_subtitles"):
+        text_steps.append(("🎬 Merging subtitles to video", _7_sub_into_vid.merge_subtitles_to_video))
+    else:
+        console.print(
+            Panel(
+                "[bold yellow]Burn-in subtitles is disabled. Skip subtitle-video merge step.[/]",
+                border_style="yellow",
+            )
+        )
     
     if dubbing:
         dubbing_steps = [

@@ -2,7 +2,7 @@ import platform
 import subprocess
 
 import cv2
-import numpy as np
+import numpy as np  # kept for backward-compatible runtime states
 from rich.console import Console
 
 from core._1_ytdlp import find_video_files
@@ -32,19 +32,6 @@ def merge_video_audio():
     """Merge video and audio, and reduce video volume"""
     VIDEO_FILE = find_video_files()
     background_file = _BACKGROUND_AUDIO_FILE
-    
-    if not load_key("burn_subtitles"):
-        rprint("[bold yellow]Warning: A 0-second black video will be generated as a placeholder as subtitles are not burned in.[/bold yellow]")
-
-        # Create a black frame
-        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(DUB_VIDEO, fourcc, 1, (1920, 1080))
-        out.write(frame)
-        out.release()
-
-        rprint("[bold green]Placeholder video has been generated.[/bold green]")
-        return
 
     # Normalize dub audio
     normalized_dub_audio = 'output/normalized_dub.wav'
@@ -56,20 +43,31 @@ def merge_video_audio():
     TARGET_HEIGHT = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
     video.release()
     rprint(f"[bold green]Video resolution: {TARGET_WIDTH}x{TARGET_HEIGHT}[/bold green]")
-    
-    subtitle_filter = (
-        f"subtitles={DUB_SUB_FILE}:force_style='FontSize={TRANS_FONT_SIZE},"
-        f"FontName={TRANS_FONT_NAME},PrimaryColour={TRANS_FONT_COLOR},"
-        f"OutlineColour={TRANS_OUTLINE_COLOR},OutlineWidth={TRANS_OUTLINE_WIDTH},"
-        f"BackColour={TRANS_BACK_COLOR},Alignment=2,MarginV=27,BorderStyle=4'"
-    )
-    
+
+    burn_subtitles = load_key("burn_subtitles")
+    if burn_subtitles:
+        subtitle_filter = (
+            f"subtitles={DUB_SUB_FILE}:force_style='FontSize={TRANS_FONT_SIZE},"
+            f"FontName={TRANS_FONT_NAME},PrimaryColour={TRANS_FONT_COLOR},"
+            f"OutlineColour={TRANS_OUTLINE_COLOR},OutlineWidth={TRANS_OUTLINE_WIDTH},"
+            f"BackColour={TRANS_BACK_COLOR},Alignment=2,MarginV=27,BorderStyle=4'"
+        )
+        video_chain = (
+            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
+            f"{subtitle_filter}[v]"
+        )
+    else:
+        rprint("[bold yellow]Burn-in subtitles is disabled. Export dubbed video without hard subtitles.[/bold yellow]")
+        video_chain = (
+            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[v]"
+        )
+
     cmd = [
         'ffmpeg', '-y', '-i', VIDEO_FILE, '-i', background_file, '-i', normalized_dub_audio,
         '-filter_complex',
-        f'[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,'
-        f'pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,'
-        f'{subtitle_filter}[v];'
+        f'{video_chain};'
         f'[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=3[a]'
     ]
 

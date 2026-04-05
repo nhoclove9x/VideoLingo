@@ -1,7 +1,7 @@
 import os, subprocess, time
 from core._1_ytdlp import find_video_files
 import cv2
-import numpy as np
+import numpy as np  # kept for backward-compatible runtime states
 import platform
 from core.utils import *
 
@@ -44,18 +44,8 @@ def merge_subtitles_to_video():
     video_file = find_video_files()
     os.makedirs(os.path.dirname(OUTPUT_VIDEO), exist_ok=True)
 
-    # Check resolution
     if not load_key("burn_subtitles"):
-        rprint("[bold yellow]Warning: A 0-second black video will be generated as a placeholder as subtitles are not burned in.[/bold yellow]")
-
-        # Create a black frame
-        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, 1, (1920, 1080))
-        out.write(frame)
-        out.release()
-
-        rprint("[bold green]Placeholder video has been generated.[/bold green]")
+        rprint("[bold yellow]Burn-in subtitles is disabled. Skip subtitle-video merge step.[/bold yellow]")
         return
 
     if not os.path.exists(SRC_SRT) or not os.path.exists(TRANS_SRT):

@@ -1,4 +1,6 @@
 import os
+import ast
+import re
 import pandas as pd
 import subprocess
 from pydub import AudioSegment
@@ -13,14 +15,50 @@ DUB_VOCAL_FILE = 'output/dub.mp3'
 DUB_SUB_FILE = 'output/dub.srt'
 OUTPUT_FILE_TEMPLATE = f"{_AUDIO_SEGS_DIR}/{{}}.wav"
 
+NP_SCALAR_PATTERN = re.compile(
+    r"(?:np|numpy)\.(?:float16|float32|float64|int8|int16|int32|int64|uint8|uint16|uint32|uint64)\(([^()]+)\)"
+)
+
+
+def _parse_cell_value(value):
+    """Parse list-like values from Excel safely."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        text = NP_SCALAR_PATTERN.sub(r"\1", text)
+        try:
+            return ast.literal_eval(text)
+        except Exception:
+            if text.lower() in {"nan", "none"}:
+                return []
+            raise
+    if pd.isna(value):
+        return []
+    return value
+
+
+def _to_float_time_ranges(time_ranges):
+    """Normalize nested time ranges to plain python float pairs."""
+    normalized = []
+    for time_range in time_ranges:
+        if not isinstance(time_range, (list, tuple)) or len(time_range) != 2:
+            continue
+        start_time, end_time = time_range
+        normalized.append([float(start_time), float(end_time)])
+    return normalized
+
+
 def load_and_flatten_data(excel_file):
     """Load and flatten Excel data"""
     df = pd.read_excel(excel_file)
-    lines = [eval(line) if isinstance(line, str) else line for line in df['lines'].tolist()]
+    lines = [_parse_cell_value(line) for line in df['lines'].tolist()]
     lines = [item for sublist in lines for item in sublist]
-    
-    new_sub_times = [eval(time) if isinstance(time, str) else time for time in df['new_sub_times'].tolist()]
-    new_sub_times = [item for sublist in new_sub_times for item in sublist]
+
+    new_sub_times = [_parse_cell_value(time) for time in df['new_sub_times'].tolist()]
+    new_sub_times = [
+        item for sublist in new_sub_times for item in _to_float_time_ranges(sublist)
+    ]
     
     return df, lines, new_sub_times
 
@@ -29,7 +67,7 @@ def get_audio_files(df):
     audios = []
     for index, row in df.iterrows():
         number = row['number']
-        line_count = len(eval(row['lines']) if isinstance(row['lines'], str) else row['lines'])
+        line_count = len(_parse_cell_value(row['lines']))
         for line_index in range(line_count):
             temp_file = OUTPUT_FILE_TEMPLATE.format(f"{number}_{line_index}")
             audios.append(temp_file)

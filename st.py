@@ -13,6 +13,12 @@ st.set_page_config(page_title="VideoLingo", page_icon="docs/logo.svg")
 
 SUB_VIDEO = "output/output_sub.mp4"
 DUB_VIDEO = "output/output_dub.mp4"
+SUBTITLE_OUTPUT_FILES = [
+    "output/src.srt",
+    "output/trans.srt",
+    "output/src_trans.srt",
+    "output/trans_src.srt",
+]
 
 
 # ─── Task control UI (auto-refreshes every 1s while task is active) ───
@@ -84,6 +90,7 @@ def _task_control_panel(runner_key: str):
 
     elif runner.state == "error":
         st.error(f"❌ {t('Task error')}: {runner.error_msg}")
+        st.caption("Detailed traceback: output/log/task_runner_error.log")
         if st.button(t("OK"), key=f"{runner_key}_ack_error", use_container_width=True):
             runner.reset()
             st.rerun(scope="app")
@@ -114,17 +121,31 @@ def _get_text_steps():
                 _6_gen_sub.align_timestamp_main(),
             ),
         ),
-        (
-            t("Merging subtitles into the video"),
-            _7_sub_into_vid.merge_subtitles_to_video,
-        ),
     ]
+    if load_key("burn_subtitles"):
+        steps.append(
+            (
+                t("Merging subtitles into the video"),
+                _7_sub_into_vid.merge_subtitles_to_video,
+            )
+        )
     return steps
+
+
+def _is_subtitle_stage_completed() -> bool:
+    """Check subtitle stage completion depending on merge setting."""
+    if load_key("burn_subtitles"):
+        return os.path.exists(SUB_VIDEO)
+    return all(os.path.exists(path) for path in SUBTITLE_OUTPUT_FILES)
 
 
 def text_processing_section():
     st.header(t("b. Translate and Generate Subtitles"))
     runner = TaskRunner.get(st.session_state, "_text_runner")
+    text_steps = _get_text_steps()
+    step_lines = "<br>".join(
+        [f"{i + 1}. {label}" for i, (label, _) in enumerate(text_steps)]
+    )
 
     with st.container(border=True):
         st.markdown(
@@ -132,17 +153,12 @@ def text_processing_section():
         <p style='font-size: 20px;'>
         {t("This stage includes the following steps:")}
         <p style='font-size: 20px;'>
-            1. {t("WhisperX word-level transcription")}<br>
-            2. {t("Sentence segmentation using NLP and LLM")}<br>
-            3. {t("Summarization and multi-step translation")}<br>
-            4. {t("Cutting and aligning long subtitles")}<br>
-            5. {t("Generating timeline and subtitles")}<br>
-            6. {t("Merging subtitles into the video")}
+            {step_lines}
         """,
             unsafe_allow_html=True,
         )
 
-        if not os.path.exists(SUB_VIDEO):
+        if not _is_subtitle_stage_completed():
             if runner.is_active:
                 _task_control_panel("_text_runner")
             elif runner.is_done:
@@ -151,12 +167,17 @@ def text_processing_section():
                 if st.button(
                     t("Start Processing Subtitles"), key="text_processing_button"
                 ):
-                    steps = _get_text_steps()
-                    runner.start(steps)
+                    runner.start(text_steps)
                     st.rerun()
         else:
-            if load_key("burn_subtitles"):
+            if load_key("burn_subtitles") and os.path.exists(SUB_VIDEO):
                 st.video(SUB_VIDEO)
+            else:
+                st.info(
+                    t(
+                        "Subtitle files are ready. Video merge is skipped, so you can do post-production later."
+                    )
+                )
             download_subtitle_zip_button(text=t("Download All Srt Files"))
 
             if st.button(t("Archive to 'history'"), key="cleanup_in_text_processing"):
@@ -189,6 +210,10 @@ def _get_audio_steps():
 def audio_processing_section():
     st.header(t("c. Dubbing"))
     runner = TaskRunner.get(st.session_state, "_audio_runner")
+    audio_steps = _get_audio_steps()
+    step_lines = "<br>".join(
+        [f"{i + 1}. {label}" for i, (label, _) in enumerate(audio_steps)]
+    )
 
     with st.container(border=True):
         st.markdown(
@@ -196,10 +221,7 @@ def audio_processing_section():
         <p style='font-size: 20px;'>
         {t("This stage includes the following steps:")}
         <p style='font-size: 20px;'>
-            1. {t("Generate audio tasks and chunks")}<br>
-            2. {t("Extract reference audio")}<br>
-            3. {t("Generate and merge audio files")}<br>
-            4. {t("Merge final audio into video")}
+            {step_lines}
         """,
             unsafe_allow_html=True,
         )
@@ -213,8 +235,7 @@ def audio_processing_section():
                 if st.button(
                     t("Start Audio Processing"), key="audio_processing_button"
                 ):
-                    steps = _get_audio_steps()
-                    runner.start(steps)
+                    runner.start(audio_steps)
                     st.rerun()
         else:
             st.success(
