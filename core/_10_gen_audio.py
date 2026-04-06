@@ -92,25 +92,37 @@ def generate_tts_audio(tasks_df: pd.DataFrame) -> pd.DataFrame:
                 rprint(f"[red]❌ Error in warmup: {str(e)}[/red]")
                 raise e
         
-        # for gpt_sovits, do not use parallel to avoid mistakes
-        max_workers = load_key("max_workers") if load_key("tts_method") != "gpt_sovits" else 1
+        # Heavy/local TTS backends are safer in single-worker mode to reduce memory spikes.
+        tts_method = load_key("tts_method")
+        single_worker_methods = {"gpt_sovits", "chatterbox_tts"}
+        max_workers = 1 if tts_method in single_worker_methods else load_key("max_workers")
         # parallel processing for remaining tasks
         if len(tasks_df) > warmup_size:
             remaining_tasks = tasks_df.iloc[warmup_size:].copy()
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(process_row, row, tasks_df.copy())
-                    for _, row in remaining_tasks.iterrows()
-                ]
-                
-                for future in as_completed(futures):
+            if max_workers <= 1:
+                for _, row in remaining_tasks.iterrows():
                     try:
-                        number, real_dur = future.result()
+                        number, real_dur = process_row(row, tasks_df)
                         tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
                         progress.advance(task)
                     except Exception as e:
                         rprint(f"[red]❌ Error: {str(e)}[/red]")
                         raise e
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        executor.submit(process_row, row, tasks_df)
+                        for _, row in remaining_tasks.iterrows()
+                    ]
+
+                    for future in as_completed(futures):
+                        try:
+                            number, real_dur = future.result()
+                            tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
+                            progress.advance(task)
+                        except Exception as e:
+                            rprint(f"[red]❌ Error: {str(e)}[/red]")
+                            raise e
 
     rprint("[bold green]✨ TTS audio generation completed![/bold green]")
     return tasks_df

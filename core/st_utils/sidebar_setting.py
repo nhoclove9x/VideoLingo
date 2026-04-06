@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import platform
+import importlib.util
 from translations.translations import translate as t
 from translations.translations import DISPLAY_LANGUAGES
 from core.utils import *
@@ -249,6 +250,7 @@ def page_setting():
             "azure_tts",
             "openai_tts",
             "chatanywhere_tts",
+            "chatterbox_tts",
             "fish_tts",
             "sf_fish_tts",
             "edge_tts",
@@ -310,6 +312,122 @@ def page_setting():
             )
             if custom_prompt != load_key("chatanywhere_tts.custom_prompt"):
                 update_key("chatanywhere_tts.custom_prompt", custom_prompt)
+
+        elif select_tts == "chatterbox_tts":
+            chatterbox_installed = importlib.util.find_spec("chatterbox") is not None
+            if not chatterbox_installed:
+                st.warning(
+                    "Chatterbox is optional and not installed yet.\n"
+                    "Install with: `python -m pip install --no-deps chatterbox-tts`",
+                    icon="⚠️",
+                )
+                st.caption(
+                    "If you see missing module `perth`, install: "
+                    "`python -m pip install resemble-perth`"
+                )
+            st.caption(
+                "Memory tip: Chatterbox runs with single-worker generation to reduce RAM spikes."
+            )
+
+            model_variant_options = {
+                "standard": "Chatterbox",
+                "turbo": "Chatterbox-Turbo",
+                "multilingual": "Chatterbox-Multilingual",
+            }
+            current_variant = load_key("chatterbox_tts.model_variant")
+            selected_variant = st.selectbox(
+                "Chatterbox Model",
+                options=list(model_variant_options.keys()),
+                format_func=lambda x: model_variant_options[x],
+                index=list(model_variant_options.keys()).index(current_variant)
+                if current_variant in model_variant_options
+                else 0,
+                help="`standard` quality, `turbo` faster and lighter, `multilingual` for multi-language TTS.",
+            )
+            if selected_variant != current_variant:
+                update_key("chatterbox_tts.model_variant", selected_variant)
+                st.rerun()
+
+            device_options = ["auto", "cuda", "mps", "cpu"]
+            current_device = load_key("chatterbox_tts.device")
+            selected_device = st.selectbox(
+                "Chatterbox Device",
+                options=device_options,
+                index=device_options.index(current_device)
+                if current_device in device_options
+                else 0,
+                help="`auto` tries cuda -> mps -> cpu.",
+            )
+            if selected_device != current_device:
+                update_key("chatterbox_tts.device", selected_device)
+                st.rerun()
+
+            clone_mode_options = {
+                "none": "No Clone",
+                "custom": "Custom Ref Audio",
+                "first_ref": "Use First Segment Ref",
+                "per_segment": "Use Per-Segment Ref",
+            }
+            current_clone_mode = load_key("chatterbox_tts.clone_mode")
+            selected_clone_mode = st.selectbox(
+                "Chatterbox Clone Mode",
+                options=list(clone_mode_options.keys()),
+                format_func=lambda x: clone_mode_options[x],
+                index=list(clone_mode_options.keys()).index(current_clone_mode)
+                if current_clone_mode in clone_mode_options
+                else 0,
+                help=(
+                    "`No Clone`: synthesize without reference voice. "
+                    "`Custom`: choose your own wav file. "
+                    "`First Segment`: use output/audio/refers/1.wav. "
+                    "`Per-Segment`: use output/audio/refers/<number>.wav."
+                ),
+            )
+            if selected_clone_mode != current_clone_mode:
+                update_key("chatterbox_tts.clone_mode", selected_clone_mode)
+                st.rerun()
+
+            if selected_clone_mode == "custom":
+                config_input(
+                    "Chatterbox Reference Audio Path",
+                    "chatterbox_tts.reference_audio_path",
+                    help="Local wav path for voice cloning prompt.",
+                    placeholder="example: output/audio/refers/1.wav",
+                )
+            elif selected_clone_mode in {"first_ref", "per_segment"}:
+                st.caption(
+                    "Clone references are read from `output/audio/refers/`. "
+                    "Run `Extract reference audio` step first."
+                )
+
+            exaggeration = st.slider(
+                "Chatterbox Exaggeration",
+                min_value=0.0,
+                max_value=2.0,
+                step=0.05,
+                value=float(load_key("chatterbox_tts.exaggeration")),
+                help="Higher values make style/emotion stronger.",
+            )
+            if exaggeration != float(load_key("chatterbox_tts.exaggeration")):
+                update_key("chatterbox_tts.exaggeration", float(exaggeration))
+
+            cfg_weight = st.slider(
+                "Chatterbox CFG Weight",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.05,
+                value=float(load_key("chatterbox_tts.cfg_weight")),
+                help="Lower values are usually slower and steadier. Default 0.5.",
+            )
+            if cfg_weight != float(load_key("chatterbox_tts.cfg_weight")):
+                update_key("chatterbox_tts.cfg_weight", float(cfg_weight))
+
+            if selected_variant == "multilingual":
+                config_input(
+                    "Chatterbox Language ID",
+                    "chatterbox_tts.language_id",
+                    help="Language code for multilingual model, e.g. en, vi, zh, ja, fr.",
+                )
 
         elif select_tts == "fish_tts":
             config_input("302ai API", "fish_tts.api_key")
