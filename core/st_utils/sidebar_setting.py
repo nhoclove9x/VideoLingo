@@ -246,11 +246,23 @@ def page_setting():
             update_key("burn_subtitles", burn_subtitles)
             st.rerun()
     with st.expander(t("Dubbing Settings"), expanded=True):
+        merge_dub_video = st.toggle(
+            t("Merge dubbed audio into video"),
+            value=load_key("merge_dub_into_video"),
+            help=t(
+                "Enable to merge dub audio into video. Disable to stop after generating dub.mp3 and dub.srt."
+            ),
+        )
+        if merge_dub_video != load_key("merge_dub_into_video"):
+            update_key("merge_dub_into_video", merge_dub_video)
+            st.rerun()
+
         tts_methods = [
             "azure_tts",
             "openai_tts",
             "chatanywhere_tts",
             "chatterbox_tts",
+            "kokoro_tts",
             "fish_tts",
             "sf_fish_tts",
             "edge_tts",
@@ -314,6 +326,12 @@ def page_setting():
                 update_key("chatanywhere_tts.custom_prompt", custom_prompt)
 
         elif select_tts == "chatterbox_tts":
+            def _cfg_or_default(key, default):
+                try:
+                    return load_key(key)
+                except KeyError:
+                    return default
+
             chatterbox_installed = importlib.util.find_spec("chatterbox") is not None
             if not chatterbox_installed:
                 st.warning(
@@ -361,6 +379,72 @@ def page_setting():
             if selected_device != current_device:
                 update_key("chatterbox_tts.device", selected_device)
                 st.rerun()
+
+            st.markdown("**Apple Silicon Speed**")
+            mps_fast_mode = st.toggle(
+                "MPS Fast Mode",
+                value=bool(_cfg_or_default("chatterbox_tts.mps_fast_mode", True)),
+                help=(
+                    "When device is MPS, enable speed-focused optimizations "
+                    "(autocast FP16, lower Turbo top-k, and optional loudness shortcut)."
+                ),
+            )
+            if mps_fast_mode != bool(_cfg_or_default("chatterbox_tts.mps_fast_mode", True)):
+                update_key("chatterbox_tts.mps_fast_mode", bool(mps_fast_mode))
+                st.rerun()
+
+            mps_autocast = st.toggle(
+                "MPS Autocast FP16",
+                value=bool(_cfg_or_default("chatterbox_tts.mps_autocast", True)),
+                help="Usually faster on Apple Silicon, with minor quality tradeoff.",
+            )
+            if mps_autocast != bool(_cfg_or_default("chatterbox_tts.mps_autocast", True)):
+                update_key("chatterbox_tts.mps_autocast", bool(mps_autocast))
+
+            mps_top_k_cap = st.slider(
+                "MPS Turbo Top-K Cap",
+                min_value=100,
+                max_value=1000,
+                step=20,
+                value=int(_cfg_or_default("chatterbox_tts.mps_top_k_cap", 480)),
+                help="Lower value = faster, but may reduce pronunciation stability.",
+            )
+            if mps_top_k_cap != int(_cfg_or_default("chatterbox_tts.mps_top_k_cap", 480)):
+                update_key("chatterbox_tts.mps_top_k_cap", int(mps_top_k_cap))
+
+            mps_disable_norm_loudness = st.toggle(
+                "MPS Skip Ref Loudness Normalize",
+                value=bool(
+                    _cfg_or_default("chatterbox_tts.mps_disable_norm_loudness", True)
+                ),
+                help="Faster reference-audio prep for Turbo cloning.",
+            )
+            if mps_disable_norm_loudness != bool(
+                _cfg_or_default("chatterbox_tts.mps_disable_norm_loudness", True)
+            ):
+                update_key(
+                    "chatterbox_tts.mps_disable_norm_loudness",
+                    bool(mps_disable_norm_loudness),
+                )
+
+            cache_cleanup_interval = st.slider(
+                "Cache Cleanup Interval",
+                min_value=1,
+                max_value=20,
+                step=1,
+                value=int(_cfg_or_default("chatterbox_tts.cache_cleanup_interval", 6)),
+                help=(
+                    "Clear Python/GPU cache every N segments. "
+                    "Higher = faster, but uses more memory."
+                ),
+            )
+            if cache_cleanup_interval != int(
+                _cfg_or_default("chatterbox_tts.cache_cleanup_interval", 6)
+            ):
+                update_key(
+                    "chatterbox_tts.cache_cleanup_interval",
+                    int(cache_cleanup_interval),
+                )
 
             clone_mode_options = {
                 "none": "No Clone",
@@ -428,6 +512,58 @@ def page_setting():
                     "chatterbox_tts.language_id",
                     help="Language code for multilingual model, e.g. en, vi, zh, ja, fr.",
                 )
+
+        elif select_tts == "kokoro_tts":
+            kokoro_installed = importlib.util.find_spec("kokoro") is not None
+            if not kokoro_installed:
+                st.warning(
+                    "Kokoro is optional and not installed yet.\n"
+                    "Install with: `python -m pip install kokoro soundfile`",
+                    icon="⚠️",
+                )
+            st.caption(
+                "Memory tip: Kokoro runs in single-worker generation mode to reduce RAM spikes."
+            )
+            config_input(
+                "Kokoro Voice",
+                "kokoro_tts.voice",
+                help="Example voices: af_heart, af_bella, am_adam, am_michael, bf_emma.",
+            )
+            config_input(
+                "Kokoro Lang Code",
+                "kokoro_tts.lang_code",
+                help="Language code for KPipeline. Example: `a` for American English.",
+            )
+
+            current_speed = float(load_key("kokoro_tts.speed"))
+            speed = st.slider(
+                "Kokoro Speed",
+                min_value=0.5,
+                max_value=2.0,
+                step=0.05,
+                value=current_speed,
+                help="Higher value = faster speech.",
+            )
+            if speed != current_speed:
+                update_key("kokoro_tts.speed", float(speed))
+
+            config_input(
+                "Kokoro Split Pattern",
+                "kokoro_tts.split_pattern",
+                help=r"Regex for text splitting, default is \n+",
+            )
+
+            current_sr = int(load_key("kokoro_tts.sample_rate"))
+            sample_rate = st.number_input(
+                "Kokoro Sample Rate",
+                min_value=8000,
+                max_value=48000,
+                value=current_sr,
+                step=1000,
+                help="Use pipeline default unless you know what you are tuning.",
+            )
+            if int(sample_rate) != current_sr:
+                update_key("kokoro_tts.sample_rate", int(sample_rate))
 
         elif select_tts == "fish_tts":
             config_input("302ai API", "fish_tts.api_key")

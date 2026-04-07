@@ -5,9 +5,8 @@ import platform
 import time
 from typing import Optional
 
-import librosa
-
 from core.utils import except_handler, load_key, rprint, update_key
+from core.asr_backend.audio_segment import load_audio_segment
 
 MODEL_CANDIDATES = {
     "large-v3": [
@@ -36,14 +35,12 @@ def _resolve_model_candidates(model_name: str):
 
 
 def _slice_audio(audio_path: str, start: float = None, end: float = None, sr: int = 16000):
-    audio, _ = librosa.load(audio_path, sr=sr)
-    duration = len(audio) / sr
     start = 0.0 if start is None else max(float(start), 0.0)
-    end = duration if end is None else min(float(end), duration)
-
-    start_sample = int(start * sr)
-    end_sample = int(end * sr)
-    return audio[start_sample:end_sample], start, end
+    end = None if end is None else max(float(end), start)
+    audio = load_audio_segment(audio_path, start=start, end=end, sample_rate=sr)
+    if end is None:
+        end = start + (len(audio) / sr)
+    return audio, start, end
 
 
 def _transcribe_with_model(transcribe, audio_segment, model_name: str, language: Optional[str]):
@@ -190,6 +187,12 @@ def _normalize_to_whisperx_format(result: dict, time_offset: float) -> dict:
     return {"segments": normalized_segments}
 
 
+def _segment_log_file(start: float, end: float) -> str:
+    start_tag = "full" if start is None else f"{float(start):.3f}"
+    end_tag = "full" if end is None else f"{float(end):.3f}"
+    return f"{OUTPUT_LOG_DIR}/whispermlx_{start_tag}_{end_tag}.json"
+
+
 @except_handler("WhisperMLX processing error:")
 def transcribe_audio_mlx(
     raw_audio_file: str,
@@ -205,7 +208,7 @@ def transcribe_audio_mlx(
         )
 
     os.makedirs(OUTPUT_LOG_DIR, exist_ok=True)
-    log_file = f"{OUTPUT_LOG_DIR}/whispermlx_{start}_{end}.json"
+    log_file = _segment_log_file(start, end)
     if os.path.exists(log_file):
         with open(log_file, "r", encoding="utf-8") as f:
             return json.load(f)

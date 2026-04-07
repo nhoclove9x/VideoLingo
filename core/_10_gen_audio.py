@@ -94,7 +94,7 @@ def generate_tts_audio(tasks_df: pd.DataFrame) -> pd.DataFrame:
         
         # Heavy/local TTS backends are safer in single-worker mode to reduce memory spikes.
         tts_method = load_key("tts_method")
-        single_worker_methods = {"gpt_sovits", "chatterbox_tts"}
+        single_worker_methods = {"gpt_sovits", "chatterbox_tts", "kokoro_tts"}
         max_workers = 1 if tts_method in single_worker_methods else load_key("max_workers")
         # parallel processing for remaining tasks
         if len(tasks_df) > warmup_size:

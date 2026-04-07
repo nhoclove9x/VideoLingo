@@ -1,5 +1,7 @@
 import streamlit as st
 import os, sys, time
+import warnings
+import json
 from core.st_utils.imports_and_utils import *
 from core.st_utils.task_runner import TaskRunner
 from core import *
@@ -9,16 +11,68 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 os.environ["PATH"] += os.pathsep + current_dir
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+warnings.filterwarnings(
+    "ignore",
+    message="Torchaudio's I/O functions now support per-call backend dispatch.*",
+    category=UserWarning,
+)
+
 st.set_page_config(page_title="VideoLingo", page_icon="docs/logo.svg")
 
 SUB_VIDEO = "output/output_sub.mp4"
 DUB_VIDEO = "output/output_dub.mp4"
+DUB_AUDIO = "output/dub.mp3"
+DUB_SUB_FILE = "output/dub.srt"
 SUBTITLE_OUTPUT_FILES = [
     "output/src.srt",
     "output/trans.srt",
     "output/src_trans.srt",
     "output/trans_src.srt",
 ]
+
+
+def _merge_dub_into_video_enabled() -> bool:
+    try:
+        return bool(load_key("merge_dub_into_video"))
+    except Exception:
+        return True
+
+
+def _render_subtask_progress(runner_key: str, runner):
+    """Render fine-grained progress for long-running step internals."""
+    if runner_key != "_text_runner":
+        return
+    # In text pipeline, index 2 = Summarization and multi-step translation
+    if runner.current_step != 2:
+        return
+
+    progress_file = "output/log/translation_progress.json"
+    if not os.path.exists(progress_file):
+        return
+
+    try:
+        with open(progress_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    stage = str(data.get("stage", "")).lower()
+    total = int(data.get("total_chunks", 0) or 0)
+    completed = int(data.get("completed_chunks", 0) or 0)
+    percent = float(data.get("percent", 0.0) or 0.0)
+    message = str(data.get("message", "") or "")
+
+    if stage == "summary":
+        st.caption("Sub-progress: preparing summary/context...")
+        return
+
+    if total > 0:
+        st.caption(f"Sub-progress: translated {completed}/{total} chunks ({percent:.1f}%)")
+        st.progress(min(max(percent / 100.0, 0.0), 1.0))
+        return
+
+    if message:
+        st.caption(f"Sub-progress: {message}")
 
 
 # ─── Task control UI (auto-refreshes every 1s while task is active) ───
@@ -45,6 +99,7 @@ def _task_control_panel(runner_key: str):
         else:
             st.info(f"⏳ {t('Running...')} {step_text}")
         st.progress(runner.progress)
+        _render_subtask_progress(runner_key, runner)
 
         # Control buttons
         col1, col2 = st.columns(2)
@@ -112,7 +167,11 @@ def _get_text_steps():
         ),
         (
             t("Summarization and multi-step translation"),
-            lambda: (_4_1_summarize.get_summary(), _4_2_translate.translate_all()),
+            lambda: (
+                _4_2_translate.mark_translation_summary_start(),
+                _4_1_summarize.get_summary(),
+                _4_2_translate.translate_all(),
+            ),
         ),
         (
             t("Cutting and aligning long subtitles"),
@@ -202,9 +261,16 @@ def _get_audio_steps():
         (t("Extract reference audio"), _9_refer_audio.extract_refer_audio_main),
         (t("Generate and merge audio files"), _10_gen_audio.gen_audio),
         (t("Merge full audio"), _11_merge_audio.merge_full_audio),
-        (t("Merge final audio into video"), _12_dub_to_vid.merge_video_audio),
     ]
+    if _merge_dub_into_video_enabled():
+        steps.append((t("Merge final audio into video"), _12_dub_to_vid.merge_video_audio))
     return steps
+
+
+def _is_audio_stage_completed() -> bool:
+    if _merge_dub_into_video_enabled():
+        return os.path.exists(DUB_VIDEO)
+    return os.path.exists(DUB_AUDIO)
 
 
 def audio_processing_section():
@@ -226,7 +292,7 @@ def audio_processing_section():
             unsafe_allow_html=True,
         )
 
-        if not os.path.exists(DUB_VIDEO):
+        if not _is_audio_stage_completed():
             if runner.is_active:
                 _task_control_panel("_audio_runner")
             elif runner.is_done:
@@ -243,8 +309,18 @@ def audio_processing_section():
                     "Audio processing is complete! You can check the audio files in the `output` folder."
                 )
             )
-            if load_key("burn_subtitles"):
+            if _merge_dub_into_video_enabled() and os.path.exists(DUB_VIDEO):
                 st.video(DUB_VIDEO)
+            else:
+                st.info(
+                    t(
+                        "Dub audio is ready. Video merge is skipped by setting."
+                    )
+                )
+                if os.path.exists(DUB_AUDIO):
+                    st.audio(DUB_AUDIO, format="audio/mp3")
+                if os.path.exists(DUB_SUB_FILE):
+                    st.caption(f"SRT: `{DUB_SUB_FILE}`")
             if st.button(t("Delete dubbing files"), key="delete_dubbing_files"):
                 delete_dubbing_files()
                 st.rerun()

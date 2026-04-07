@@ -2,6 +2,7 @@ import inspect
 import threading
 import gc
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 from core.utils import except_handler, load_key
@@ -9,6 +10,8 @@ from core.utils import except_handler, load_key
 _MODEL_CACHE = {}
 _MODEL_CACHE_LOCK = threading.Lock()
 _GENERATE_LOCK = threading.Lock()
+_CLEANUP_COUNTER = 0
+_CLEANUP_LOCK = threading.Lock()
 
 _MISSING_MODULE_TO_PACKAGE = {
     "perth": "resemble-perth",
@@ -22,6 +25,13 @@ _MISSING_MODULE_TO_PACKAGE = {
     "safetensors": "safetensors",
     "diffusers": "diffusers",
 }
+
+
+def _load_cfg(key: str, default):
+    try:
+        return load_key(key)
+    except KeyError:
+        return default
 
 
 def _prepare_chatterbox_runtime_env():
@@ -49,13 +59,61 @@ def _prepare_chatterbox_runtime_env():
 def _resolve_device(device_pref: str) -> str:
     import torch
 
-    if device_pref and device_pref != "auto":
-        return device_pref
+    if device_pref == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        print("Warning: CUDA selected but unavailable, falling back to auto device.")
+    elif device_pref == "mps":
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        print("Warning: MPS selected but unavailable, falling back to auto device.")
+    elif device_pref == "cpu":
+        return "cpu"
+
     if torch.cuda.is_available():
         return "cuda"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def _mps_fast_mode_enabled(device: str) -> bool:
+    return device == "mps" and bool(_load_cfg("chatterbox_tts.mps_fast_mode", True))
+
+
+def _prepare_torch_runtime(device: str):
+    if not _mps_fast_mode_enabled(device):
+        return
+
+    import torch
+
+    # Apple Silicon tends to run faster with "high" matmul precision for FP32 paths.
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+
+def _get_autocast_context(torch, device: str):
+    if device == "mps":
+        if not _mps_fast_mode_enabled(device):
+            return nullcontext()
+        if not bool(_load_cfg("chatterbox_tts.mps_autocast", True)):
+            return nullcontext()
+        try:
+            return torch.autocast(device_type="mps", dtype=torch.float16)
+        except Exception:
+            return nullcontext()
+
+    if device == "cuda":
+        if not bool(_load_cfg("chatterbox_tts.cuda_autocast", True)):
+            return nullcontext()
+        try:
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
+        except Exception:
+            return nullcontext()
+
+    return nullcontext()
 
 
 def _ensure_perth_watermarker_available():
@@ -214,7 +272,9 @@ def _load_chatterbox_model(model_variant: str, device: str):
         return model
 
 
-def _build_generate_kwargs(model, model_variant: str, reference_audio_path: str):
+def _build_generate_kwargs(
+    model, model_variant: str, reference_audio_path: str, device: str
+):
     kwargs = {}
     params = inspect.signature(model.generate).parameters
 
@@ -232,7 +292,39 @@ def _build_generate_kwargs(model, model_variant: str, reference_audio_path: str)
         if language_id:
             kwargs["language_id"] = language_id
 
+    if _mps_fast_mode_enabled(device):
+        if "top_k" in params:
+            top_k_cap = int(_load_cfg("chatterbox_tts.mps_top_k_cap", 480))
+            top_k_cap = max(50, min(1000, top_k_cap))
+            kwargs["top_k"] = top_k_cap
+        if (
+            "norm_loudness" in params
+            and bool(_load_cfg("chatterbox_tts.mps_disable_norm_loudness", True))
+        ):
+            kwargs["norm_loudness"] = False
+
     return kwargs
+
+
+def _maybe_cleanup_runtime(torch, device: str):
+    global _CLEANUP_COUNTER
+
+    interval = int(_load_cfg("chatterbox_tts.cache_cleanup_interval", 6))
+    if interval <= 0:
+        interval = 1
+
+    with _CLEANUP_LOCK:
+        _CLEANUP_COUNTER += 1
+        should_cleanup = (_CLEANUP_COUNTER % interval) == 0
+
+    if not should_cleanup:
+        return
+
+    gc.collect()
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
 
 
 def _resolve_reference_audio_path(
@@ -305,12 +397,16 @@ def chatterbox_tts(text: str, save_path: str, number: int | None = None):
         )
 
     device = _resolve_device(device_pref)
+    _prepare_torch_runtime(device)
     model = _load_chatterbox_model(model_variant, device)
-    generate_kwargs = _build_generate_kwargs(model, model_variant, reference_audio_path)
+    generate_kwargs = _build_generate_kwargs(
+        model, model_variant, reference_audio_path, device
+    )
 
     with _GENERATE_LOCK:
         with torch.inference_mode():
-            wav = model.generate(text, **generate_kwargs)
+            with _get_autocast_context(torch, device):
+                wav = model.generate(text, **generate_kwargs)
 
     if isinstance(wav, torch.Tensor):
         wav = wav.detach().cpu()
@@ -323,13 +419,10 @@ def chatterbox_tts(text: str, save_path: str, number: int | None = None):
     sample_rate = int(getattr(model, "sr", 24000))
     speech_file_path = Path(save_path)
     speech_file_path.parent.mkdir(parents=True, exist_ok=True)
+    wav = wav.to(dtype=torch.float32)
     ta.save(str(speech_file_path), wav, sample_rate)
     del wav
-    gc.collect()
-    if device == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-        torch.mps.empty_cache()
+    _maybe_cleanup_runtime(torch, device)
     print(
         f"Chatterbox audio saved to {speech_file_path} "
         f"(variant={model_variant}, device={device})"

@@ -6,6 +6,12 @@ from rich import box
 from core.utils import *
 console = Console()
 
+def _safe_load_key(key: str, default):
+    try:
+        return load_key(key)
+    except Exception:
+        return default
+
 def valid_translate_result(result: dict, required_keys: list, required_sub_keys: list):
     # Check for the required key
     if not all(key in result for key in required_keys):
@@ -20,6 +26,8 @@ def valid_translate_result(result: dict, required_keys: list, required_sub_keys:
 
 def translate_lines(lines, previous_content_prompt, after_cotent_prompt, things_to_note_prompt, summary_prompt, index = 0):
     shared_prompt = generate_shared_prompt(previous_content_prompt, after_cotent_prompt, summary_prompt, things_to_note_prompt)
+    retry_count = int(_safe_load_key("translation.retry_count", 3))
+    verbose_per_chunk = bool(_safe_load_key("translation.verbose_per_chunk", False))
 
     # Retry translation if the length of the original text and the translated text are not the same, or if the specified key is missing
     def retry_translation(prompt, length, step_name):
@@ -27,16 +35,19 @@ def translate_lines(lines, previous_content_prompt, after_cotent_prompt, things_
             return valid_translate_result(response_data, [str(i) for i in range(1, length+1)], ['direct'])
         def valid_express(response_data):
             return valid_translate_result(response_data, [str(i) for i in range(1, length+1)], ['free'])
-        for retry in range(3):
+        for retry in range(retry_count):
             if step_name == 'faithfulness':
                 result = ask_gpt(prompt+retry* " ", resp_type='json', valid_def=valid_faith, log_title=f'translate_{step_name}')
             elif step_name == 'expressiveness':
                 result = ask_gpt(prompt+retry* " ", resp_type='json', valid_def=valid_express, log_title=f'translate_{step_name}')
             if len(lines.split('\n')) == len(result):
                 return result
-            if retry != 2:
+            if retry != retry_count - 1:
                 console.print(f'[yellow]⚠️ {step_name.capitalize()} translation of block {index} failed, Retry...[/yellow]')
-        raise ValueError(f'[red]❌ {step_name.capitalize()} translation of block {index} failed after 3 retries. Please check `output/gpt_log/error.json` for more details.[/red]')
+        raise ValueError(
+            f'[red]❌ {step_name.capitalize()} translation of block {index} '
+            f'failed after {retry_count} retries. Please check `output/gpt_log/error.json` for more details.[/red]'
+        )
 
     ## Step 1: Faithful to the Original Text
     prompt1 = get_prompt_faithfulness(lines, shared_prompt)
@@ -51,31 +62,31 @@ def translate_lines(lines, previous_content_prompt, after_cotent_prompt, things_
         # If reflect_translate is False or not set, use faithful translation directly
         translate_result = "\n".join([faith_result[i]["direct"].strip() for i in faith_result])
         
-        table = Table(title="Translation Results", show_header=False, box=box.ROUNDED)
-        table.add_column("Translations", style="bold")
-        for i, key in enumerate(faith_result):
-            table.add_row(f"[cyan]Origin:  {faith_result[key]['origin']}[/cyan]")
-            table.add_row(f"[magenta]Direct:  {faith_result[key]['direct']}[/magenta]")
-            if i < len(faith_result) - 1:
-                table.add_row("[yellow]" + "-" * 50 + "[/yellow]")
-        
-        console.print(table)
+        if verbose_per_chunk:
+            table = Table(title="Translation Results", show_header=False, box=box.ROUNDED)
+            table.add_column("Translations", style="bold")
+            for i, key in enumerate(faith_result):
+                table.add_row(f"[cyan]Origin:  {faith_result[key]['origin']}[/cyan]")
+                table.add_row(f"[magenta]Direct:  {faith_result[key]['direct']}[/magenta]")
+                if i < len(faith_result) - 1:
+                    table.add_row("[yellow]" + "-" * 50 + "[/yellow]")
+            console.print(table)
         return translate_result, lines
 
     ## Step 2: Express Smoothly  
     prompt2 = get_prompt_expressiveness(faith_result, lines, shared_prompt)
     express_result = retry_translation(prompt2, len(lines.split('\n')), 'expressiveness')
 
-    table = Table(title="Translation Results", show_header=False, box=box.ROUNDED)
-    table.add_column("Translations", style="bold")
-    for i, key in enumerate(express_result):
-        table.add_row(f"[cyan]Origin:  {faith_result[key]['origin']}[/cyan]")
-        table.add_row(f"[magenta]Direct:  {faith_result[key]['direct']}[/magenta]")
-        table.add_row(f"[green]Free:    {express_result[key]['free']}[/green]")
-        if i < len(express_result) - 1:
-            table.add_row("[yellow]" + "-" * 50 + "[/yellow]")
-
-    console.print(table)
+    if verbose_per_chunk:
+        table = Table(title="Translation Results", show_header=False, box=box.ROUNDED)
+        table.add_column("Translations", style="bold")
+        for i, key in enumerate(express_result):
+            table.add_row(f"[cyan]Origin:  {faith_result[key]['origin']}[/cyan]")
+            table.add_row(f"[magenta]Direct:  {faith_result[key]['direct']}[/magenta]")
+            table.add_row(f"[green]Free:    {express_result[key]['free']}[/green]")
+            if i < len(express_result) - 1:
+                table.add_row("[yellow]" + "-" * 50 + "[/yellow]")
+        console.print(table)
 
     translate_result = "\n".join([express_result[i]["free"].replace('\n', ' ').strip() for i in express_result])
 

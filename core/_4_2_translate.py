@@ -1,6 +1,8 @@
 import pandas as pd
 import json
 import concurrent.futures
+import os
+from datetime import datetime
 from core.translate_lines import translate_lines
 from core._4_1_summarize import search_things_to_note_in_prompt
 from core._8_1_audio_task import check_len_then_trim
@@ -8,15 +10,66 @@ from core._6_gen_sub import align_timestamp
 from core.utils import *
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from difflib import SequenceMatcher
 from core.utils.models import *
 console = Console()
+TRANSLATION_PROGRESS_FILE = "output/log/translation_progress.json"
+
+def _safe_load_key(key: str, default):
+    try:
+        return load_key(key)
+    except Exception:
+        return default
+
+
+def _write_translation_progress(
+    total_chunks: int,
+    completed_chunks: int,
+    status: str = "running",
+    stage: str = "translation",
+    message: str = "",
+):
+    os.makedirs("output/log", exist_ok=True)
+    total = max(int(total_chunks), 0)
+    completed = min(max(int(completed_chunks), 0), total if total else 0)
+    percent = (completed / total * 100.0) if total > 0 else 0.0
+    payload = {
+        "stage": stage,  # summary | translation | completed | error
+        "status": status,  # running | completed | error
+        "total_chunks": total,
+        "completed_chunks": completed,
+        "percent": round(percent, 2),
+        "message": message,
+        "updated_at": datetime.now().isoformat(),
+    }
+    with open(TRANSLATION_PROGRESS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def mark_translation_summary_start():
+    _write_translation_progress(
+        total_chunks=0,
+        completed_chunks=0,
+        status="running",
+        stage="summary",
+        message="Preparing summary/context...",
+    )
+
+
+def _mark_translation_error(message: str):
+    _write_translation_progress(
+        total_chunks=0,
+        completed_chunks=0,
+        status="error",
+        stage="error",
+        message=message,
+    )
+
 
 # Function to split text into chunks
-def split_chunks_by_chars(chunk_size, max_i): 
+def split_chunks_by_chars(chunk_size, max_i):
     """Split text into chunks based on character count, return a list of multi-line text chunks"""
     with open(_3_2_SPLIT_BY_MEANING, "r", encoding="utf-8") as file:
-        sentences = file.read().strip().split('\n')
+        sentences = [line.strip() for line in file.read().strip().split('\n') if line.strip()]
 
     chunks = []
     chunk = ''
@@ -33,66 +86,105 @@ def split_chunks_by_chars(chunk_size, max_i):
     return chunks
 
 # Get context from surrounding chunks
-def get_previous_content(chunks, chunk_index):
-    return None if chunk_index == 0 else chunks[chunk_index - 1].split('\n')[-3:] # Get last 3 lines
-def get_after_content(chunks, chunk_index):
-    return None if chunk_index == len(chunks) - 1 else chunks[chunk_index + 1].split('\n')[:2] # Get first 2 lines
+def get_previous_content(chunks, chunk_index, context_prev_lines):
+    if chunk_index == 0 or context_prev_lines <= 0:
+        return None
+    return chunks[chunk_index - 1].split('\n')[-context_prev_lines:]
+
+def get_after_content(chunks, chunk_index, context_next_lines):
+    if chunk_index == len(chunks) - 1 or context_next_lines <= 0:
+        return None
+    return chunks[chunk_index + 1].split('\n')[:context_next_lines]
 
 # 🔍 Translate a single chunk
-def translate_chunk(chunk, chunks, theme_prompt, i):
+def translate_chunk(chunk, chunks, theme_prompt, i, context_prev_lines, context_next_lines):
     things_to_note_prompt = search_things_to_note_in_prompt(chunk)
-    previous_content_prompt = get_previous_content(chunks, i)
-    after_content_prompt = get_after_content(chunks, i)
+    previous_content_prompt = get_previous_content(chunks, i, context_prev_lines)
+    after_content_prompt = get_after_content(chunks, i, context_next_lines)
     translation, english_result = translate_lines(chunk, previous_content_prompt, after_content_prompt, things_to_note_prompt, theme_prompt, i)
     return i, english_result, translation
-
-# Add similarity calculation function
-def similar(a, b):
-    return SequenceMatcher(None, a, b).ratio()
 
 # 🚀 Main function to translate all chunks
 @check_file_exists(_4_2_TRANSLATION)
 def translate_all():
     console.print("[bold green]Start Translating All...[/bold green]")
-    chunks = split_chunks_by_chars(chunk_size=600, max_i=10)
+    mark_translation_summary_start()
+    chunk_size_chars = int(_safe_load_key("translation.chunk_size_chars", 600))
+    chunk_max_lines = int(_safe_load_key("translation.chunk_max_lines", 10))
+    context_prev_lines = int(_safe_load_key("translation.context_prev_lines", 3))
+    context_next_lines = int(_safe_load_key("translation.context_next_lines", 2))
+    translation_workers = int(_safe_load_key("translation.max_workers", load_key("max_workers")))
+
+    chunks = split_chunks_by_chars(chunk_size=chunk_size_chars, max_i=chunk_max_lines)
+    console.print(
+        f"[cyan]Translation chunks: {len(chunks)} "
+        f"(chunk_size_chars={chunk_size_chars}, chunk_max_lines={chunk_max_lines}, "
+        f"workers={translation_workers})[/cyan]"
+    )
+    _write_translation_progress(
+        total_chunks=len(chunks),
+        completed_chunks=0,
+        status="running",
+        stage="translation",
+        message="Translating chunks...",
+    )
     with open(_4_1_TERMINOLOGY, 'r', encoding='utf-8') as file:
         theme_prompt = json.load(file).get('theme')
 
     # 🔄 Use concurrent execution for translation
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         task = progress.add_task("[cyan]Translating chunks...", total=len(chunks))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=load_key("max_workers")) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=translation_workers) as executor:
             futures = []
             for i, chunk in enumerate(chunks):
-                future = executor.submit(translate_chunk, chunk, chunks, theme_prompt, i)
+                future = executor.submit(
+                    translate_chunk,
+                    chunk,
+                    chunks,
+                    theme_prompt,
+                    i,
+                    context_prev_lines,
+                    context_next_lines,
+                )
                 futures.append(future)
             results = []
             for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    _mark_translation_error(f"Translation chunk failed: {e}")
+                    raise
                 progress.update(task, advance=1)
+                _write_translation_progress(
+                    total_chunks=len(chunks),
+                    completed_chunks=len(results),
+                    status="running",
+                    stage="translation",
+                    message="Translating chunks...",
+                )
 
     results.sort(key=lambda x: x[0])  # Sort results based on original order
+    results_by_index = {idx: (src, trans) for idx, src, trans in results}
     
     # 💾 Save results to lists and Excel file
     src_text, trans_text = [], []
     for i, chunk in enumerate(chunks):
         chunk_lines = chunk.split('\n')
         src_text.extend(chunk_lines)
-        
-        # Calculate similarity between current chunk and translation results
-        chunk_text = ''.join(chunk_lines).lower()
-        matching_results = [(r, similar(''.join(r[1].split('\n')).lower(), chunk_text)) 
-                          for r in results]
-        best_match = max(matching_results, key=lambda x: x[1])
-        
-        # Check similarity and handle exceptions
-        if best_match[1] < 0.9:
-            console.print(f"[yellow]Warning: No matching translation found for chunk {i}[/yellow]")
-            raise ValueError(f"Translation matching failed (chunk {i})")
-        elif best_match[1] < 1.0:
-            console.print(f"[yellow]Warning: Similar match found (chunk {i}, similarity: {best_match[1]:.3f})[/yellow]")
-            
-        trans_text.extend(best_match[0][2].split('\n'))
+
+        if i not in results_by_index:
+            _mark_translation_error(f"Missing translation result for chunk {i}")
+            raise ValueError(f"Missing translation result for chunk {i}")
+        _, chunk_translation = results_by_index[i]
+        chunk_trans_lines = chunk_translation.split('\n')
+        if len(chunk_lines) != len(chunk_trans_lines):
+            _mark_translation_error(
+                f"Chunk {i} line mismatch: src={len(chunk_lines)}, trans={len(chunk_trans_lines)}"
+            )
+            raise ValueError(
+                f"Chunk {i} line mismatch: src={len(chunk_lines)}, trans={len(chunk_trans_lines)}"
+            )
+        trans_text.extend(chunk_trans_lines)
     
     # Trim long translation text
     df_text = pd.read_excel(_2_CLEANED_CHUNKS)
@@ -106,6 +198,13 @@ def translate_all():
     console.print(df_time)
     
     df_time.to_excel(_4_2_TRANSLATION, index=False)
+    _write_translation_progress(
+        total_chunks=len(chunks),
+        completed_chunks=len(chunks),
+        status="completed",
+        stage="completed",
+        message="Translation completed.",
+    )
     console.print("[bold green]✅ Translation completed and results saved.[/bold green]")
 
 if __name__ == '__main__':

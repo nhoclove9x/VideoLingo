@@ -2,6 +2,7 @@ import os
 import warnings
 import time
 import subprocess
+import json
 import torch
 import functools
 
@@ -29,10 +30,13 @@ torch.load = _patched_torch_load
 # Now safe to import whisperx and the rest of the application
 # =============================================================================
 import whisperx
-from whisperx.audio import load_audio as _whisperx_load_audio, SAMPLE_RATE as _WHISPERX_SR
 from rich import print as rprint
 from core.utils import *
+from core.asr_backend.audio_segment import load_audio_segment
+
 MODEL_DIR = load_key("model_dir")
+OUTPUT_LOG_DIR = "output/log"
+_HF_ENDPOINT_CACHE = None
 
 @except_handler("failed to check hf mirror", default_return=None)
 def check_hf_mirror():
@@ -58,22 +62,79 @@ def check_hf_mirror():
     rprint(f"[cyan]🚀 Selected mirror:[/cyan] {fastest_url} ({best_time:.2f}s)")
     return fastest_url
 
+
+def _get_hf_endpoint():
+    global _HF_ENDPOINT_CACHE
+    if _HF_ENDPOINT_CACHE:
+        return _HF_ENDPOINT_CACHE
+    _HF_ENDPOINT_CACHE = check_hf_mirror() or "https://huggingface.co"
+    return _HF_ENDPOINT_CACHE
+
+
+def _infer_runtime_params(device: str):
+    if device == "cuda":
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        batch_size = 8 if gpu_mem > 8 else 2
+        compute_type = "float16" if torch.cuda.is_bf16_supported() else "int8"
+        rprint(
+            f"[cyan]🎮 GPU memory:[/cyan] {gpu_mem:.2f} GB, "
+            f"[cyan]📦 Batch size:[/cyan] {batch_size}, "
+            f"[cyan]⚙️ Compute type:[/cyan] {compute_type}"
+        )
+        return batch_size, compute_type
+
+    batch_size = 1
+    compute_type = "int8"
+    rprint(
+        f"[cyan]📦 Batch size:[/cyan] {batch_size}, "
+        f"[cyan]⚙️ Compute type:[/cyan] {compute_type}"
+    )
+    return batch_size, compute_type
+
+
+def _transcribe_with_fallback(model, raw_audio_segment, batch_size: int):
+    # Retry with smaller batch sizes if GPU OOM happens.
+    candidates = [batch_size] + [b for b in [8, 4, 2, 1] if b < batch_size]
+    used = set()
+    for bs in candidates:
+        if bs in used:
+            continue
+        used.add(bs)
+        try:
+            return model.transcribe(
+                raw_audio_segment,
+                batch_size=bs,
+                print_progress=True,
+            )
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "out of memory" not in msg and "cuda" not in msg:
+                raise
+            rprint(f"[yellow]⚠️ OOM at batch_size={bs}, retrying with smaller batch...[/yellow]")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    raise RuntimeError("WhisperX failed after retrying smaller batch sizes.")
+
+
+def _segment_log_file(start, end):
+    start_tag = "full" if start is None else f"{float(start):.3f}"
+    end_tag = "full" if end is None else f"{float(end):.3f}"
+    return f"{OUTPUT_LOG_DIR}/whisperxlocal_{start_tag}_{end_tag}.json"
+
+
 @except_handler("WhisperX processing error:")
 def transcribe_audio(raw_audio_file, vocal_audio_file, start, end):
-    os.environ['HF_ENDPOINT'] = check_hf_mirror()
+    os.makedirs(OUTPUT_LOG_DIR, exist_ok=True)
+    log_file = _segment_log_file(start, end)
+    if os.path.exists(log_file):
+        with open(log_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    os.environ['HF_ENDPOINT'] = _get_hf_endpoint()
     WHISPER_LANGUAGE = load_key("whisper.language")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     rprint(f"🚀 Starting WhisperX using device: {device} ...")
-    
-    if device == "cuda":
-        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        batch_size = 16 if gpu_mem > 8 else 2
-        compute_type = "float16" if torch.cuda.is_bf16_supported() else "int8"
-        rprint(f"[cyan]🎮 GPU memory:[/cyan] {gpu_mem:.2f} GB, [cyan]📦 Batch size:[/cyan] {batch_size}, [cyan]⚙️ Compute type:[/cyan] {compute_type}")
-    else:
-        batch_size = 1
-        compute_type = "int8"
-        rprint(f"[cyan]📦 Batch size:[/cyan] {batch_size}, [cyan]⚙️ Compute type:[/cyan] {compute_type}")
+    batch_size, compute_type = _infer_runtime_params(device)
     rprint(f"[green]▶️ Starting WhisperX for segment {start:.2f}s to {end:.2f}s...[/green]")
     
     if WHISPER_LANGUAGE == 'zh':
@@ -95,29 +156,24 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end):
     rprint("[bold yellow] You can ignore warning of `Model was trained with torch 1.10.0+cu102, yours is 2.0.0+cu118...`[/bold yellow]")
     model = whisperx.load_model(model_name, device, compute_type=compute_type, language=whisper_language, vad_options=vad_options, asr_options=asr_options, download_root=MODEL_DIR)
 
-    def load_audio_segment(audio_file, start, end):
-        # Use whisperx's ffmpeg-based loader instead of librosa.load() which
-        # deadlocks inside Streamlit's ScriptRunner thread.
-        full_audio = _whisperx_load_audio(audio_file, sr=_WHISPERX_SR)
-        start_sample = int(start * _WHISPERX_SR)
-        end_sample = int(end * _WHISPERX_SR)
-        return full_audio[start_sample:end_sample]
-
     raw_audio_segment = load_audio_segment(raw_audio_file, start, end)
     vocal_audio_segment = load_audio_segment(vocal_audio_file, start, end)
+    if len(raw_audio_segment) == 0:
+        raise ValueError("Audio segment is empty for WhisperX transcription")
     
     # -------------------------
     # 1. transcribe raw audio
     # -------------------------
     transcribe_start_time = time.time()
     rprint("[bold green]Note: You will see Progress if working correctly ↓[/bold green]")
-    result = model.transcribe(raw_audio_segment, batch_size=batch_size, print_progress=True)
+    result = _transcribe_with_fallback(model, raw_audio_segment, batch_size)
     transcribe_time = time.time() - transcribe_start_time
     rprint(f"[cyan]⏱️ time transcribe:[/cyan] {transcribe_time:.2f}s")
 
     # Free GPU resources
     del model
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Save language
     update_key("whisper.language", result['language'])
@@ -135,16 +191,21 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end):
     rprint(f"[cyan]⏱️ time align:[/cyan] {align_time:.2f}s")
 
     # Free GPU resources again
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     del model_a
 
     # Adjust timestamps
     for segment in result['segments']:
         segment['start'] += start
         segment['end'] += start
-        for word in segment['words']:
+        for word in segment.get('words', []):
             if 'start' in word:
                 word['start'] += start
             if 'end' in word:
                 word['end'] += start
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=4, ensure_ascii=False)
+
     return result
