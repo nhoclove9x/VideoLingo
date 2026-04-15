@@ -2,6 +2,7 @@
 try:
     from . import (
         _1_ytdlp,
+        _1_5_speed,
         _2_asr,
         _3_1_split_nlp,
         _3_2_split_meaning,
@@ -30,6 +31,7 @@ __all__ = [
     'cleanup',
     'delete_dubbing_files',
     '_1_ytdlp',
+    '_1_5_speed',
     '_2_asr',
     '_3_1_split_nlp',
     '_3_2_split_meaning',

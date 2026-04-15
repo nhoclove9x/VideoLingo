@@ -1,4 +1,4 @@
-import os, subprocess
+import os, subprocess, tempfile
 import pandas as pd
 from typing import Dict, List, Tuple
 from pydub import AudioSegment
@@ -49,7 +49,33 @@ def normalize_audio_volume(audio_path, output_path, target_db = -20.0, format = 
     audio = AudioSegment.from_file(audio_path)
     change_in_dBFS = target_db - audio.dBFS
     normalized_audio = audio.apply_gain(change_in_dBFS)
-    normalized_audio.export(output_path, format=format)
+
+    same_path = os.path.abspath(audio_path) == os.path.abspath(output_path)
+    export_path = output_path
+    temp_path = None
+
+    try:
+        if same_path:
+            out_dir = os.path.dirname(output_path) or "."
+            os.makedirs(out_dir, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(prefix="normalize_", suffix=f".{format}", dir=out_dir)
+            os.close(fd)
+            export_path = temp_path
+
+        normalized_audio.export(export_path, format=format)
+
+        if same_path:
+            if not os.path.isfile(export_path) or os.path.getsize(export_path) == 0:
+                raise RuntimeError(f"Normalized audio export failed: {export_path}")
+            os.replace(export_path, output_path)
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError(f"Normalized audio output is invalid: {output_path}")
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
     rprint(f"[green]✅ Audio normalized from {audio.dBFS:.1f}dB to {target_db:.1f}dB[/green]")
     return output_path
 

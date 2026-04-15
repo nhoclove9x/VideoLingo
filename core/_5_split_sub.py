@@ -1,6 +1,7 @@
 import pandas as pd
 from typing import List, Tuple
 import concurrent.futures
+import re
 
 from core._3_2_split_meaning import split_sentence
 from core.prompts import get_align_prompt
@@ -30,6 +31,99 @@ def calc_len(text: str) -> float:
 
     return sum(char_weight(char) for char in text)
 
+
+def _target_part_sort_key(key: str) -> int:
+    match = re.search(r'(\d+)$', key)
+    return int(match.group(1)) if match else 10**9
+
+
+def _extract_target_parts(align_data) -> List[str]:
+    target_parts = []
+    for item in align_data or []:
+        keys = sorted(
+            [key for key in item.keys() if key.startswith('target_part_')],
+            key=_target_part_sort_key,
+        )
+        for key in keys:
+            value = str(item[key]).strip()
+            if value:
+                target_parts.append(value)
+    return target_parts
+
+
+def _merge_text_parts(parts: List[str]) -> str:
+    cleaned = [str(part).strip() for part in parts if str(part).strip()]
+    if not cleaned:
+        return ""
+
+    merged = cleaned[0]
+    for part in cleaned[1:]:
+        if part and part[0] in ",.;:!?%)]}":
+            merged += part
+        elif any(char.isspace() for char in merged) or any(char.isspace() for char in part):
+            merged = f"{merged} {part}".strip()
+        else:
+            merged += part
+    return merged.strip()
+
+
+def _split_sequence_evenly(items: List[str], count: int) -> List[List[str]]:
+    if count <= 0:
+        return []
+    if not items:
+        return [[] for _ in range(count)]
+
+    base, extra = divmod(len(items), count)
+    chunks = []
+    cursor = 0
+    for i in range(count):
+        size = base + (1 if i < extra else 0)
+        if size <= 0:
+            chunks.append([])
+            continue
+        chunks.append(items[cursor:cursor + size])
+        cursor += size
+    return chunks
+
+
+def _fallback_split_translation(text: str, expected_parts: int) -> List[str]:
+    text = str(text).strip()
+    if expected_parts <= 1:
+        return [text]
+    if not text:
+        return [""] * expected_parts
+
+    words = text.split()
+    if len(words) >= expected_parts:
+        return [' '.join(chunk).strip() for chunk in _split_sequence_evenly(words, expected_parts)]
+
+    chars = list(text)
+    chunks = [''.join(chunk).strip() for chunk in _split_sequence_evenly(chars, expected_parts)]
+    return chunks + [""] * max(0, expected_parts - len(chunks))
+
+
+def _normalize_target_parts(src_parts: List[str], align_data, tr_sub: str) -> List[str]:
+    expected_parts = len(src_parts)
+    if expected_parts == 0:
+        return []
+    target_parts = _extract_target_parts(align_data)
+
+    if len(target_parts) > expected_parts:
+        console.print(
+            f"[yellow]⚠️ Alignment returned {len(target_parts)} target parts for {expected_parts} source parts. "
+            "Merging overflow parts into the last subtitle line.[/yellow]"
+        )
+        target_parts = target_parts[:expected_parts-1] + [_merge_text_parts(target_parts[expected_parts-1:])]
+
+    if len(target_parts) == expected_parts and all(part.strip() for part in target_parts):
+        return target_parts
+
+    console.print(
+        f"[yellow]⚠️ Alignment returned {len(target_parts)} usable target parts for {expected_parts} source parts. "
+        "Falling back to an even split of the translated subtitle.[/yellow]"
+    )
+    return _fallback_split_translation(tr_sub, expected_parts)
+
 def align_subs(src_sub: str, tr_sub: str, src_part: str) -> Tuple[List[str], List[str], str]:
     align_prompt = get_align_prompt(src_sub, tr_sub, src_part)
     
@@ -41,13 +135,10 @@ def align_subs(src_sub: str, tr_sub: str, src_part: str) -> Tuple[List[str], Lis
         return {"status": "success", "message": "Align completed"}
     parsed = ask_gpt(align_prompt, resp_type='json', valid_def=valid_align, log_title='align_subs')
     align_data = parsed['align']
-    src_parts = src_part.split('\n')
-    tr_parts = [item[f'target_part_{i+1}'].strip() for i, item in enumerate(align_data)]
+    src_parts = [part.strip() for part in src_part.split('\n') if part.strip()]
+    tr_parts = _normalize_target_parts(src_parts, align_data, tr_sub)
     
-    whisper_language = load_key("whisper.language")
-    language = load_key("whisper.detected_language") if whisper_language == 'auto' else whisper_language
-    joiner = get_joiner(language)
-    tr_remerged = joiner.join(tr_parts)
+    tr_remerged = _merge_text_parts(tr_parts)
     
     table = Table(title="🔗 Aligned parts")
     table.add_column("Language", style="cyan")
@@ -106,7 +197,7 @@ def split_for_sub_main():
     
     for attempt in range(3):  # 多次切割
         console.print(Panel(f"🔄 Split attempt {attempt + 1}", expand=False))
-        split_src, split_trans, remerged = split_align_subs(src.copy(), trans)
+        split_src, split_trans, remerged = split_align_subs(src.copy(), trans.copy())
         
         # 检查是否所有字幕都符合长度要求
         if all(len(src) <= MAX_SUB_LENGTH for src in split_src) and \
@@ -121,6 +212,12 @@ def split_for_sub_main():
         remerged += [None] * (len(src) - len(remerged))
     elif len(remerged) > len(src):
         src += [None] * (len(remerged) - len(src))
+
+    if len(split_src) != len(split_trans):
+        raise ValueError(
+            "Subtitle split result is still inconsistent after normalization: "
+            f"source={len(split_src)}, translation={len(split_trans)}"
+        )
     
     pd.DataFrame({'Source': split_src, 'Translation': split_trans}).to_excel(_5_SPLIT_SUB, index=False)
     pd.DataFrame({'Source': src, 'Translation': remerged}).to_excel(_5_REMERGED, index=False)

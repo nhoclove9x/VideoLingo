@@ -15,19 +15,85 @@ TRANS_SUBS_FOR_AUDIO_FILE = 'output/audio/trans_subs_for_audio.srt'
 SRC_SUBS_FOR_AUDIO_FILE = 'output/audio/src_subs_for_audio.srt'
 ESTIMATOR = None
 
-def check_len_then_trim(text, duration):
-    global ESTIMATOR
-    if ESTIMATOR is None:
-        ESTIMATOR = init_estimator()
-    estimated_duration = estimate_duration(text, ESTIMATOR) / speed_factor['max']
-    
-    console.print(f"Subtitle text: {text}, "
-                  f"[bold green]Estimated reading duration: {estimated_duration:.2f} seconds[/bold green]")
+def _safe_load_key(key, default):
+    try:
+        return load_key(key)
+    except Exception:
+        return default
 
-    if estimated_duration > duration:
-        rprint(Panel(f"Estimated reading duration {estimated_duration:.2f} seconds exceeds given duration {duration:.2f} seconds, shortening...", title="Processing", border_style="yellow"))
+def _space_tokens(text: str):
+    tokens = []
+    for token in re.split(r"\s+", str(text).strip()):
+        if not token:
+            continue
+        # Ignore pure punctuation tokens when counting readable words.
+        if re.sub(r"^\W+|\W+$", "", token, flags=re.UNICODE):
+            tokens.append(token)
+    return tokens
+
+def _word_count_by_space(text: str) -> int:
+    return len(_space_tokens(text))
+
+def _truncate_to_word_limit(text: str, max_words: int) -> str:
+    tokens = _space_tokens(text)
+    if len(tokens) <= max_words:
+        return str(text).strip()
+    return " ".join(tokens[:max_words]).strip()
+
+def _duration_word_limit(text: str, duration: float):
+    if not _safe_load_key("subtitle_readability.enable", True):
+        return None
+    only_space_separated = bool(_safe_load_key("subtitle_readability.only_space_separated", True))
+    if only_space_separated and not re.search(r"\s", str(text).strip()):
+        return None
+    words_per_second = float(_safe_load_key("subtitle_readability.words_per_second", 3))
+    max_words = int(_safe_load_key("subtitle_readability.max_words", 18))
+    min_words = int(_safe_load_key("subtitle_readability.min_words", 3))
+    duration_words = int(max(float(duration), 0.0) * words_per_second)
+    duration_words = max(duration_words, min_words)
+    return min(duration_words, max_words)
+
+def check_len_then_trim(text, duration, max_words=None):
+    text = str(text).strip()
+    if not text:
+        return text
+
+    word_limit = max_words if max_words is not None else _duration_word_limit(text, duration)
+    word_count = _word_count_by_space(text) if word_limit is not None else None
+
+    over_word_limit = word_limit is not None and word_count > word_limit
+
+    estimated_duration = None
+    if not over_word_limit:
+        global ESTIMATOR
+        if ESTIMATOR is None:
+            ESTIMATOR = init_estimator()
+        estimated_duration = estimate_duration(text, ESTIMATOR) / speed_factor['max']
+
+    details = []
+    if estimated_duration is not None:
+        details.append(
+            f"[bold green]Estimated reading duration: {estimated_duration:.2f} seconds[/bold green]"
+        )
+    if word_limit is not None:
+        details.append(f"[bold cyan]Words: {word_count}/{word_limit}[/bold cyan]")
+    console.print(f"Subtitle text: {text}, " + ", ".join(details))
+
+    over_duration = estimated_duration is not None and estimated_duration > duration
+
+    if over_duration or over_word_limit:
+        reasons = []
+        if over_duration:
+            reasons.append(
+                f"reading duration {estimated_duration:.2f}s exceeds {duration:.2f}s"
+            )
+        if over_word_limit:
+            reasons.append(
+                f"word count {word_count} exceeds limit {word_limit}"
+            )
+        rprint(Panel(f"{'; '.join(reasons)}, shortening...", title="Processing", border_style="yellow"))
         original_text = text
-        prompt = get_subtitle_trim_prompt(text, duration)
+        prompt = get_subtitle_trim_prompt(text, duration, max_words=word_limit)
         def valid_trim(response):
             if 'result' not in response:
                 return {'status': 'error', 'message': 'No result in response'}
@@ -38,6 +104,10 @@ def check_len_then_trim(text, duration):
         except Exception:
             rprint("[bold red]🚫 AI refused to answer due to sensitivity, so manually remove punctuation[/bold red]")
             shortened_text = re.sub(r'[,.!?;:，。！？；：]', ' ', text).strip()
+
+        if word_limit is not None and _word_count_by_space(shortened_text) > word_limit:
+            shortened_text = _truncate_to_word_limit(shortened_text, word_limit)
+
         rprint(Panel(f"Subtitle before shortening: {original_text}\nSubtitle after shortening: {shortened_text}", title="Subtitle Shortening Result", border_style="green"))
         return shortened_text
     else:

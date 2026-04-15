@@ -181,6 +181,32 @@ def _get_audio_duration_seconds(audio_file: str) -> float:
         return 0.0
 
 
+def _probe_audio_duration_seconds(audio_file: str) -> Optional[float]:
+    try:
+        duration = float(mediainfo(audio_file).get("duration", 0) or 0)
+        if duration > 0:
+            return duration
+    except Exception:
+        return None
+    return None
+
+
+def _is_valid_audio_file(audio_file: str, min_size_bytes: int = 1024) -> bool:
+    try:
+        if not os.path.isfile(audio_file):
+            return False
+        if os.path.getsize(audio_file) < min_size_bytes:
+            return False
+    except OSError:
+        return False
+
+    duration = _probe_audio_duration_seconds(audio_file)
+    if duration is None:
+        # If ffprobe is unavailable, keep a best-effort size-based validation.
+        return True
+    return duration > 0.0
+
+
 def _ensure_fallback_tracks():
     # Fallback path: no Demucs separation, keep pipeline running with raw track.
     os.makedirs(_AUDIO_DIR, exist_ok=True)
@@ -196,7 +222,7 @@ def _ensure_fallback_tracks():
 
 
 def _tracks_up_to_date() -> bool:
-    if not (os.path.exists(_VOCAL_AUDIO_FILE) and os.path.exists(_BACKGROUND_AUDIO_FILE)):
+    if not (_is_valid_audio_file(_VOCAL_AUDIO_FILE) and _is_valid_audio_file(_BACKGROUND_AUDIO_FILE)):
         return False
     try:
         raw_mtime = os.path.getmtime(_RAW_AUDIO_FILE)
@@ -433,6 +459,13 @@ def demucs_audio():
         console.print(f"[green]✅ Background built with mode: {bg_mode}[/green]")
         del background
         _write_demucs_status("separated")
+
+    if not (_is_valid_audio_file(_VOCAL_AUDIO_FILE) and _is_valid_audio_file(_BACKGROUND_AUDIO_FILE)):
+        console.print(
+            "[yellow]⚠️ Demucs output tracks are invalid or empty. Rebuilding with raw-audio fallback.[/yellow]"
+        )
+        _ensure_fallback_tracks()
+        return
     
     # Clean up memory
     del outputs, model

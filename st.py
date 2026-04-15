@@ -4,6 +4,7 @@ import warnings
 import json
 from core.st_utils.imports_and_utils import *
 from core.st_utils.task_runner import TaskRunner
+from core.utils.srt_recheck import run_srt_recheck_pairs
 from core import *
 
 # SET PATH
@@ -23,6 +24,10 @@ SUB_VIDEO = "output/output_sub.mp4"
 DUB_VIDEO = "output/output_dub.mp4"
 DUB_AUDIO = "output/dub.mp3"
 DUB_SUB_FILE = "output/dub.srt"
+DUB_RECHECK_PAIRS = [
+    ("output/src.srt", "output/trans.srt"),
+    ("output/audio/src_subs_for_audio.srt", "output/audio/trans_subs_for_audio.srt"),
+]
 SUBTITLE_OUTPUT_FILES = [
     "output/src.srt",
     "output/trans.srt",
@@ -38,12 +43,23 @@ def _merge_dub_into_video_enabled() -> bool:
         return True
 
 
+def _video_speed_factor() -> float:
+    try:
+        return float(load_key("video_speed.factor"))
+    except Exception:
+        return 1.0
+
+
+def _run_dubbing_srt_recheck() -> list[dict]:
+    return run_srt_recheck_pairs(DUB_RECHECK_PAIRS)
+
+
 def _render_subtask_progress(runner_key: str, runner):
     """Render fine-grained progress for long-running step internals."""
     if runner_key != "_text_runner":
         return
-    # In text pipeline, index 2 = Summarization and multi-step translation
-    if runner.current_step != 2:
+    # In text pipeline, index 3 = Summarization and multi-step translation
+    if runner.current_step != 3:
         return
 
     progress_file = "output/log/translation_progress.json"
@@ -157,6 +173,7 @@ def _task_control_panel(runner_key: str):
 def _get_text_steps():
     """Return the subtitle processing steps as (label, callable) list."""
     steps = [
+        (t("Adjust video speed (optional)"), _1_5_speed.adjust_video_speed),
         (t("WhisperX word-level transcription"), _2_asr.transcribe),
         (
             t("Sentence segmentation using NLP and LLM"),
@@ -207,6 +224,20 @@ def text_processing_section():
     )
 
     with st.container(border=True):
+        current_speed = _video_speed_factor()
+        input_speed = st.number_input(
+            t("Video speed before subtitle processing (0.10~10.00)"),
+            min_value=0.10,
+            max_value=10.0,
+            value=current_speed,
+            step=0.05,
+            format="%.2f",
+            disabled=runner.is_active,
+        )
+        st.caption(t("1.00 = original speed, >1.00 = faster, <1.00 = slower"))
+        if abs(float(input_speed) - current_speed) > 1e-6:
+            update_key("video_speed.factor", float(input_speed))
+
         st.markdown(
             f"""
         <p style='font-size: 20px;'>
@@ -291,6 +322,42 @@ def audio_processing_section():
         """,
             unsafe_allow_html=True,
         )
+
+        if st.button(
+            t("Recheck target SRT and fill missing lines"),
+            key="recheck_dubbing_srt_button",
+            use_container_width=True,
+            disabled=runner.is_active,
+        ):
+            try:
+                recheck_results = _run_dubbing_srt_recheck()
+                if not recheck_results:
+                    st.warning(
+                        t(
+                            "No source SRT found for recheck. Please complete subtitle processing first."
+                        )
+                    )
+                else:
+                    total_missing = sum(item["filled_missing"] for item in recheck_results)
+                    total_empty = sum(item["filled_empty"] for item in recheck_results)
+                    changed_files = sum(1 for item in recheck_results if item["changed"])
+                    if changed_files > 0:
+                        st.success(
+                            t(
+                                "Recheck complete: target SRT has been updated to match source line count."
+                            )
+                        )
+                    else:
+                        st.info(
+                            t(
+                                "Recheck complete: target SRT already matches source line count."
+                            )
+                        )
+                    st.caption(
+                        f"files updated: {changed_files}, missing filled: {total_missing}, empty filled: {total_empty}"
+                    )
+            except Exception as e:
+                st.error(f"❌ {t('Task error')}: {e}")
 
         if not _is_audio_stage_completed():
             if runner.is_active:
