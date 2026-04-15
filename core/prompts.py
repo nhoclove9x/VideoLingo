@@ -299,13 +299,16 @@ Note: Start you answer with ```json and end with ```, do not add any other text.
 
 ## ================================================================
 # @ step8_gen_audio_task.py @ step10_gen_audio.py
-def get_subtitle_trim_prompt(text, duration):
+def get_subtitle_trim_prompt(text, duration, max_words=None):
  
     rule = '''Consider a. Reducing filler words without modifying meaningful content. b. Omitting unnecessary modifiers or pronouns, for example:
     - "Please explain your thought process" can be shortened to "Please explain thought process"
     - "We need to carefully analyze this complex problem" can be shortened to "We need to analyze this problem"
     - "Let's discuss the various different perspectives on this topic" can be shortened to "Let's discuss different perspectives on this topic"
     - "Can you describe in detail your experience from yesterday" can be shortened to "Can you describe yesterday's experience" '''
+    word_limit_note = ""
+    if max_words is not None:
+        word_limit_note = f'\nMax words: {max_words} (count by spaces)\n'
 
     trim_prompt = f'''
 ## Role
@@ -316,15 +319,18 @@ Your expertise lies in cleverly shortening subtitles slightly while ensuring the
 <subtitles>
 Subtitle: "{text}"
 Duration: {duration} seconds
+{word_limit_note}
 </subtitles>
 
 ## Processing Rules
 {rule}
+{"c. Keep the optimized subtitle within the Max words limit." if max_words is not None else ""}
 
 ## Processing Steps
 Please follow these steps and provide the results in the JSON output:
 1. Analysis: Briefly analyze the subtitle's structure, key information, and filler words that can be omitted.
 2. Trimming: Based on the rules and analysis, optimize the subtitle by making it more concise according to the processing rules.
+3. If Max words is provided, strictly ensure the final subtitle does not exceed that word limit.
 
 ## Output in only JSON format and no other text
 ```json
